@@ -21,11 +21,19 @@
 //Team WINLAB
 //RFNoC HLS Challenge
 /*correlator.cpp - Used to generate RTL for correlator module used in RFNoC block noc_block_correlator.
+  i_data - AXI stream input data (with tlast)
+  o_data - AXI stream output data (with tlast)
+  start  - User sent start signal, to start the correlation task
+  pnseq  - PN sequence used for correlation wit the input data. As this port is setup as 'ap_hs', hanshaking signals 'valid' and 'ack' are generated. All these 3 signals are connected to the PN sequence generator instance in noc_block_correlator
+  pnseq_len - input parameter PN sequence length
+ 
 */
 #include <hls_stream.h>
 #include "ap_int.h"
 #include "rfnoc.h"
-//#define COR_SIZE_256
+// Uncomment to generate correlator size 256
+//#define COR_SIZE_256  
+// Uncomment to generate correlator size 512
 #define COR_SIZE_512
 
 void correlator (hls::stream<rfnoc_axis> i_data, hls::stream<rfnoc_axis> o_data, ap_uint<1> start, hls::stream<ap_uint<1> > pnseq_in, ap_uint<10> pnseq_len)
@@ -106,24 +114,11 @@ const int COR_SIZE = 512;
 #pragma HLS ARRAY_PARTITION variable=pn_seq complete dim=1
 
   rfnoc_axis tmp_data;
-  //ap_int<16> mux_i[256];
-  //ap_int<16> mux_q[256];
 
-  //static ap_uint<1> load;
   static ap_uint<10> load_cnt;
 #pragma HLS RESET variable=load_cnt
   static ap_uint<24> data_valid_reg;
   static ap_uint<10> pnseq_len_reg;
-  //static ap_int<32> out_sample_data;
-
-  //static ap_int<43> sq_reg_i;
-  //static ap_int<43> sq_reg_q;
-
-  //static ap_uint<44> sq_sum;
-  //hls::stream <ap_int<33> > out_data_fifo;
-//#pragma HLS STREAM variable=out_data_fifo depth=16 dim=1
-//#pragma HLS RESOURCE variable=out_data_fifo core=FIFO
-  //ap_int<33> tmp_out_data;
 
   enum correlatorState {ST_IDLE = 0, ST_LOAD, ST_GEN, ST_CORRELATE};
   static correlatorState currentState;
@@ -143,6 +138,7 @@ const int COR_SIZE = 512;
 
   static ap_int<49> sq_sum;
 
+// Output write state machine
   switch(currentwrState) {
       case ST_NOWRITE:
     	  if(data_valid_reg[11])
@@ -167,12 +163,13 @@ const int COR_SIZE = 512;
     	  break;
   }
 
-
+// correlation power I^2 + Q^2
    sq_sum = (sq_reg_i + sq_reg_q);
 
-   sq_reg_i = sum_reg_i*sum_reg_i;
-   sq_reg_q = sum_reg_q*sum_reg_q;
+   sq_reg_i = sum_reg_i*sum_reg_i; // I*I
+   sq_reg_q = sum_reg_q*sum_reg_q; // Q*Q
 
+//Last addder stage
    sum_reg_i = sum7_reg_i[0] + sum7_reg_i[1];
    sum_reg_q = sum7_reg_q[0] + sum7_reg_q[1];
 #endif
@@ -192,6 +189,7 @@ const int COR_SIZE = 512;
 
    static ap_int<51> sq_sum;
 
+// Output write state machine
   switch(currentwrState) {
       case ST_NOWRITE:
     	  if(data_valid_reg[12])
@@ -216,16 +214,17 @@ const int COR_SIZE = 512;
     	  break;
   }
 
-
+// correlation power I^2 + Q^2
       sq_sum = (sq_reg_i + sq_reg_q);
 
-      sq_reg_i = sum_reg_i*sum_reg_i;
-      sq_reg_q = sum_reg_q*sum_reg_q;
+      sq_reg_i = sum_reg_i*sum_reg_i; // I*I
+      sq_reg_q = sum_reg_q*sum_reg_q; // Q*Q
 
-
-      sum_reg_i = sum8_reg_i[0] + sum8_reg_i[1];
+//Last adder stage 
+      sum_reg_i = sum8_reg_i[0] + sum8_reg_i[1]; 
       sum_reg_q = sum8_reg_q[0] + sum8_reg_q[1];
 
+// An additional adder stage for size 512
       ADDER_STAGE8_LOOP: for(int i = 0; i<COR_SIZE/256; i++){
       #pragma HLS UNROLL
          sum8_reg_i[i] = sum7_reg_i[2*i] + sum7_reg_i[2*i + 1];
@@ -234,14 +233,12 @@ const int COR_SIZE = 512;
 
 #endif
 
-
+// 7 binary tree adder stages
   ADDER_STAGE7_LOOP: for(int i = 0; i<COR_SIZE/128; i++){
   #pragma HLS UNROLL
     sum7_reg_i[i] = sum6_reg_i[2*i] + sum6_reg_i[2*i + 1];
     sum7_reg_q[i] = sum6_reg_q[2*i] + sum6_reg_q[2*i + 1];
   }
-
-
 
   ADDER_STAGE6_LOOP: for(int i = 0; i<COR_SIZE/64; i++){
   #pragma HLS UNROLL
@@ -276,8 +273,6 @@ const int COR_SIZE = 512;
      sum2_reg_q[i] = sum1_reg_q[2*i] + sum1_reg_q[2*i + 1];
   }
 
-
-
   ADDER_STAGE1_LOOP: for(int i = 0; i<COR_SIZE/2; i++){
   #pragma HLS UNROLL
      sum1_reg_i[i] = adder_in_reg_i[2*i] + adder_in_reg_i[2*i + 1];
@@ -298,7 +293,7 @@ const int COR_SIZE = 512;
   }
 
 
-
+ // product or selection since the PN sequence is real, binary
   PRODUCT_REG_LOOP:for(int i = 0; i < COR_SIZE; i++){
   #pragma HLS UNROLL
    if(pn_seq[i] == 1){
@@ -312,18 +307,19 @@ const int COR_SIZE = 512;
   }
 
   data_valid_reg.range(23,1) = data_valid_reg.range(22,0);
-
+// Read and shift state machine 
+// Waits for the 'start' signal, reads input samples and shifts them into the shift register storage
   switch(currentState) {
     case ST_IDLE:
-  	  if(start)
+  	  if(start) // wait for start signal. The same start signal is used to load PN sequence generator
   		  currentState = ST_LOAD;
   	  break;
     case ST_LOAD:
-  	  pnseq_len_reg = pnseq_len;
+  	  pnseq_len_reg = pnseq_len;  // register input parameters
   	  load_cnt = pnseq_len - 1;
   	  currentState = ST_GEN;
   	  break;
-    case ST_GEN:
+    case ST_GEN: // Read incoming PN sequence and store it locally
   	  pn_seq[load_cnt] = pnseq_in.read();
   	  if (load_cnt == 0){
   		  currentState = ST_CORRELATE;
@@ -332,7 +328,7 @@ const int COR_SIZE = 512;
   		  currentState = ST_GEN;
   		  load_cnt = load_cnt - 1;}
   	  break;
-    case ST_CORRELATE:
+    case ST_CORRELATE: // whenever there is valid input data, shift it in
   	  if(!i_data.empty())
   	  {
   	   	  SHIFT_DATA: for(int i = COR_SIZE-1 ; i > 0 ; i--){
@@ -343,10 +339,10 @@ const int COR_SIZE = 512;
   	  	   i_data.read(tmp_data);
   	  	   data_reg_i[0] = tmp_data.data.range(15,0);
   	  	   data_reg_q[0] = tmp_data.data.range(31,16);
-  	  	   data_valid_reg[0] = 1;
+  	  	   data_valid_reg[0] = 1;   // shift in valid pulse
   	  }
   	  else
-  	  	  data_valid_reg[0] = 0;
+  	  	  data_valid_reg[0] = 0; 
         break;
     }
 
